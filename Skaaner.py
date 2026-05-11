@@ -3,13 +3,12 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 import ccxt
-import time
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Skaner PRO V9.7 - Hybrydowy Real-Time", layout="wide")
+st.set_page_config(page_title="Skaner PRO V9.8 - Silnik Bybit & YF", layout="wide")
 
-# MAPOWANIE: Nazwa (XTB) : Pary walutowe z Binance (Zamiast YF)
-KRYPTO_BINANCE = {
+# MAPOWANIE KRYPTO: Używamy Bybit (Działa na serwerach USA)
+KRYPTO_BYBIT = {
     "BITCOIN": "BTC/USDT", "ETHEREUM": "ETH/USDT", "SOLANA": "SOL/USDT", 
     "CHAINLINK": "LINK/USDT", "POLYGON": "MATIC/USDT", "RIPPLE": "XRP/USDT", 
     "CARDANO": "ADA/USDT", "DOT": "DOT/USDT", "LITECOIN": "LTC/USDT", 
@@ -37,14 +36,14 @@ ZASOBY_XTB = {
 interval_map_yf = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": "1h", "4 godz": "4h", "1 dzień": "1d"}
 interval_map_ccxt = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": "1h", "4 godz": "4h", "1 dzień": "1d"}
 
-@st.cache_data(ttl=60) # Odświeżanie częstsze (60s) ze względu na krypto
-def pobierz_krypto_binance(ticker_dict, int_label):
-    exchange = ccxt.binance({'enableRateLimit': True})
+@st.cache_data(ttl=60)
+def pobierz_krypto_ccxt(ticker_dict, int_label):
+    # Używamy giełdy Bybit zamiast Binance (omija blokady IP)
+    exchange = ccxt.bybit({'enableRateLimit': True})
     tf = interval_map_ccxt[int_label]
     data = {}
     for name, symbol in ticker_dict.items():
         try:
-            # Pobieramy ostatnie 100 świec z Binance
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -62,9 +61,15 @@ def pobierz_zasoby_yf(ticker_dict, int_label):
         try:
             df = yf.download(ticker, period="60d", interval=tf, progress=False)
             if not df.empty and len(df) > 20:
-                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                # Twarde spłaszczenie kolumn, żeby naprawić błędy nowego Yahoo Finance
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [c[0] for c in df.columns]
+                
+                # Upewnienie się, że mamy podstawowe kolumny i brak duplikatów
+                df = df.loc[:, ~df.columns.duplicated()]
                 data[name] = df
-        except: continue
+        except Exception as e:
+            continue
     return data
 
 def analizuj(df_raw, name, kapital, tryb, ryzyko):
@@ -111,38 +116,44 @@ def analizuj(df_raw, name, kapital, tryb, ryzyko):
             "TP": round(tp, 4), "SL": round(sl, 4)
         }
     except Exception as e:
-        return None
+        # Zamiast chować błąd (None), wyświetlamy go w tabeli dla diagnostyki
+        return {
+            "Instrument": name, "Sygnał": f"BŁĄD: {e}", "Siła %": 0,
+            "Cena Rynkowa": 0, "Cena Wejścia": 0, "RSI": 0, "StochRSI": 0, 
+            "Pęd": "-", "ADX": 0, "Wolumen %": 0, "Ile (1%)": 0, "TP": 0, "SL": 0
+        }
 
 def stylizuj_v9_6(row):
     s = [''] * len(row)
     idx = row.index.tolist()
-    sig = row['Sygnał']
+    sig = str(row['Sygnał'])
     
     if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: #00ff00; color: black; font-weight: bold'
     elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: #ff0000; color: white; font-weight: bold'
+    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;' # Błędy na żółto
     
     def set_col(col_name, is_green):
-        if col_name in idx:
+        if col_name in idx and 'BŁĄD' not in sig:
             s[idx.index(col_name)] = 'color: #00ff00' if is_green else 'color: #ff4b4b'
 
     if 'Pęd' in idx:
         set_col('Pęd', (sig == "KUP" and row['Pęd'] == "Wzrost") or (sig == "SPRZEDAJ" and row['Pęd'] == "Spadek"))
     if 'RSI' in idx:
-        set_col('RSI', (sig == "KUP" and row['RSI'] < 65) or (sig == "SPRZEDAJ" and row['RSI'] > 35))
+        set_col('RSI', (sig == "KUP" and float(row['RSI']) < 65) or (sig == "SPRZEDAJ" and float(row['RSI']) > 35) if row['RSI'] != 0 else False)
     if 'StochRSI' in idx:
-        set_col('StochRSI', (sig == "KUP" and row['StochRSI'] < 50) or (sig == "SPRZEDAJ" and row['StochRSI'] > 50))
+        set_col('StochRSI', (sig == "KUP" and float(row['StochRSI']) < 50) or (sig == "SPRZEDAJ" and float(row['StochRSI']) > 50) if row['StochRSI'] != 0 else False)
     if 'ADX' in idx:
-        set_col('ADX', row['ADX'] > 20)
+        set_col('ADX', float(row['ADX']) > 20 if row['ADX'] != 0 else False)
     
     if 'Wolumen %' in idx:
-        v = row['Wolumen %']
+        v = float(row['Wolumen %'])
         s[idx.index('Wolumen %')] = 'color: #00ff00' if v > 105 else ('color: #ff4b4b' if v < 55 else '')
     
     return s
 
 # --- UI ---
-st.title("⚖️ Skaner PRO V9.7 - Silnik Binance & YF")
-st.markdown("**Dane Krypto pobierane w czasie rzeczywistym z Binance API.** Tradycyjne rynki zasilane Yahoo Finance.")
+st.title("⚖️ Skaner PRO V9.8 - Silnik Bybit & YF")
+st.markdown("**Dane Krypto pobierane w czasie rzeczywistym z Bybit API.** Tradycyjne rynki zasilane Yahoo Finance.")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
@@ -154,14 +165,14 @@ with st.sidebar:
 t1, t2 = st.tabs(["₿ KRYPTOWALUTY (REAL-TIME)", "📊 INDEKSY & TOWARY"])
 
 with t1:
-    dane_krypto = pobierz_krypto_binance(KRYPTO_BINANCE, u_int)
+    dane_krypto = pobierz_krypto_ccxt(KRYPTO_BYBIT, u_int)
     wyniki_krypto = [analizuj(df, n, u_kap, u_wej, u_ryz) for n, df in dane_krypto.items()]
     wyniki_krypto = [w for w in wyniki_krypto if w is not None]
     if wyniki_krypto:
         df_res = pd.DataFrame(wyniki_krypto).sort_values("Siła %", ascending=False)
         st.dataframe(df_res.style.apply(stylizuj_v9_6, axis=1), use_container_width=True)
     else:
-        st.warning("Brak sygnałów. Sprawdź połączenie z Binance.")
+        st.warning("Brak danych lub wszystkie instrumenty zwróciły błąd. Odśwież stronę.")
 
 with t2:
     dane_zasoby = pobierz_zasoby_yf(ZASOBY_XTB, u_int)
@@ -171,4 +182,4 @@ with t2:
         df_res2 = pd.DataFrame(wyniki_zasoby).sort_values("Siła %", ascending=False)
         st.dataframe(df_res2.style.apply(stylizuj_v9_6, axis=1), use_container_width=True)
     else:
-        st.warning("Brak sygnałów z rynków tradycyjnych.")
+        st.warning("Brak sygnałów z rynków tradycyjnych lub błąd serwera Yahoo Finance.")
