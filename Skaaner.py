@@ -5,10 +5,10 @@ import yfinance as yf
 import ccxt
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Skaner PRO V9.8 - Silnik Bybit & YF", layout="wide")
+st.set_page_config(page_title="Skaner PRO V9.9 - Silnik KuCoin & YF", layout="wide")
 
-# MAPOWANIE KRYPTO: Używamy Bybit (Działa na serwerach USA)
-KRYPTO_BYBIT = {
+# MAPOWANIE KRYPTO (KuCoin obsługuje dokładnie ten sam format co Binance/Bybit)
+KRYPTO_CCXT = {
     "BITCOIN": "BTC/USDT", "ETHEREUM": "ETH/USDT", "SOLANA": "SOL/USDT", 
     "CHAINLINK": "LINK/USDT", "POLYGON": "MATIC/USDT", "RIPPLE": "XRP/USDT", 
     "CARDANO": "ADA/USDT", "DOT": "DOT/USDT", "LITECOIN": "LTC/USDT", 
@@ -38,39 +38,46 @@ interval_map_ccxt = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": 
 
 @st.cache_data(ttl=60)
 def pobierz_krypto_ccxt(ticker_dict, int_label):
-    # Używamy giełdy Bybit zamiast Binance (omija blokady IP)
-    exchange = ccxt.bybit({'enableRateLimit': True})
+    # Zmiana na KuCoin - dużo mniejszy rygor dla IP serwerów chmurowych z USA
+    exchange = ccxt.kucoin({'enableRateLimit': True})
     tf = interval_map_ccxt[int_label]
     data = {}
+    bledy = []
     for name, symbol in ticker_dict.items():
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
+            if not ohlcv:
+                bledy.append(f"{name}: Brak danych z giełdy")
+                continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             data[name] = df
         except Exception as e:
-            continue
-    return data
+            bledy.append(f"{name} ({symbol}): {str(e)}")
+    return data, bledy
 
 @st.cache_data(ttl=300)
 def pobierz_zasoby_yf(ticker_dict, int_label):
     tf = interval_map_yf[int_label]
     data = {}
+    bledy = []
     for name, ticker in ticker_dict.items():
         try:
             df = yf.download(ticker, period="60d", interval=tf, progress=False)
-            if not df.empty and len(df) > 20:
-                # Twarde spłaszczenie kolumn, żeby naprawić błędy nowego Yahoo Finance
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [c[0] for c in df.columns]
-                
-                # Upewnienie się, że mamy podstawowe kolumny i brak duplikatów
-                df = df.loc[:, ~df.columns.duplicated()]
-                data[name] = df
+            if df.empty or len(df) < 20:
+                bledy.append(f"{name}: Zbyt mało danych w Yahoo")
+                continue
+            
+            # Twarde spłaszczenie kolumn, żeby naprawić błędy nowego formatu Yahoo Finance
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0] for c in df.columns]
+            
+            df = df.loc[:, ~df.columns.duplicated()]
+            data[name] = df
         except Exception as e:
-            continue
-    return data
+            bledy.append(f"{name}: {str(e)}")
+    return data, bledy
 
 def analizuj(df_raw, name, kapital, tryb, ryzyko):
     try:
@@ -116,9 +123,8 @@ def analizuj(df_raw, name, kapital, tryb, ryzyko):
             "TP": round(tp, 4), "SL": round(sl, 4)
         }
     except Exception as e:
-        # Zamiast chować błąd (None), wyświetlamy go w tabeli dla diagnostyki
         return {
-            "Instrument": name, "Sygnał": f"BŁĄD: {e}", "Siła %": 0,
+            "Instrument": name, "Sygnał": f"BŁĄD WSK.: {e}", "Siła %": 0,
             "Cena Rynkowa": 0, "Cena Wejścia": 0, "RSI": 0, "StochRSI": 0, 
             "Pęd": "-", "ADX": 0, "Wolumen %": 0, "Ile (1%)": 0, "TP": 0, "SL": 0
         }
@@ -130,7 +136,7 @@ def stylizuj_v9_6(row):
     
     if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: #00ff00; color: black; font-weight: bold'
     elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: #ff0000; color: white; font-weight: bold'
-    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;' # Błędy na żółto
+    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
     
     def set_col(col_name, is_green):
         if col_name in idx and 'BŁĄD' not in sig:
@@ -152,8 +158,8 @@ def stylizuj_v9_6(row):
     return s
 
 # --- UI ---
-st.title("⚖️ Skaner PRO V9.8 - Silnik Bybit & YF")
-st.markdown("**Dane Krypto pobierane w czasie rzeczywistym z Bybit API.** Tradycyjne rynki zasilane Yahoo Finance.")
+st.title("⚖️ Skaner PRO V9.9 - Silnik KuCoin & YF")
+st.markdown("**Dane Krypto w czasie rzeczywistym z KuCoin API.** Rynki tradycyjne z Yahoo Finance.")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
@@ -165,21 +171,33 @@ with st.sidebar:
 t1, t2 = st.tabs(["₿ KRYPTOWALUTY (REAL-TIME)", "📊 INDEKSY & TOWARY"])
 
 with t1:
-    dane_krypto = pobierz_krypto_ccxt(KRYPTO_BYBIT, u_int)
+    dane_krypto, bledy_krypto = pobierz_krypto_ccxt(KRYPTO_CCXT, u_int)
+    
+    # Wyświetlanie ostrzeżeń diagnostycznych (bardzo ważne!)
+    if bledy_krypto and not dane_krypto:
+        st.error(f"🚨 KRYTYCZNY BŁĄD POBIERANIA KRYPTO: {bledy_krypto[0]}")
+    elif len(bledy_krypto) > 0:
+        st.warning(f"⚠️ Niektóre monety odrzuciły połączenie (np. {bledy_krypto[0]}), ale analizuję resztę.")
+        
     wyniki_krypto = [analizuj(df, n, u_kap, u_wej, u_ryz) for n, df in dane_krypto.items()]
     wyniki_krypto = [w for w in wyniki_krypto if w is not None]
+    
     if wyniki_krypto:
         df_res = pd.DataFrame(wyniki_krypto).sort_values("Siła %", ascending=False)
         st.dataframe(df_res.style.apply(stylizuj_v9_6, axis=1), use_container_width=True)
-    else:
-        st.warning("Brak danych lub wszystkie instrumenty zwróciły błąd. Odśwież stronę.")
 
 with t2:
-    dane_zasoby = pobierz_zasoby_yf(ZASOBY_XTB, u_int)
+    dane_zasoby, bledy_zasoby = pobierz_zasoby_yf(ZASOBY_XTB, u_int)
+    
+    # Wyświetlanie ostrzeżeń diagnostycznych dla Yahoo
+    if bledy_zasoby and not dane_zasoby:
+        st.error(f"🚨 BŁĄD YAHOO FINANCE: {bledy_zasoby[0]}")
+    elif len(bledy_zasoby) > 0:
+        st.warning(f"⚠️ Brak danych z Yahoo dla niektórych symboli (np. {bledy_zasoby[0]}).")
+        
     wyniki_zasoby = [analizuj(df, n, u_kap, u_wej, u_ryz) for n, df in dane_zasoby.items()]
     wyniki_zasoby = [w for w in wyniki_zasoby if w is not None]
+    
     if wyniki_zasoby:
         df_res2 = pd.DataFrame(wyniki_zasoby).sort_values("Siła %", ascending=False)
         st.dataframe(df_res2.style.apply(stylizuj_v9_6, axis=1), use_container_width=True)
-    else:
-        st.warning("Brak sygnałów z rynków tradycyjnych lub błąd serwera Yahoo Finance.")
