@@ -5,7 +5,7 @@ import yfinance as yf
 import ccxt
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Skaner PRO V10.0 - Ostateczny Sniper", layout="wide")
+st.subheader("⚡ Skaner PRO V10.0")
 
 # MAPOWANIE KRYPTO KUCOIN (Używane do analizy i gry na XTB)
 KRYPTO_CCXT = {
