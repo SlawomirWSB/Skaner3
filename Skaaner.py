@@ -7,7 +7,7 @@ import ccxt
 # --- KONFIGURACJA ---
 st.set_page_config(page_title="Skaner PRO V9.9 - Momentum Sniper", layout="wide")
 
-# MAPOWANIE KRYPTO (Zmieniono MATIC na POL)
+# MAPOWANIE KRYPTO (KuCoin - Pełna lista, zaktualizowany POL)
 KRYPTO_CCXT = {
     "BITCOIN": "BTC/USDT", "ETHEREUM": "ETH/USDT", "SOLANA": "SOL/USDT", 
     "CHAINLINK": "LINK/USDT", "POLYGON": "POL/USDT", "RIPPLE": "XRP/USDT", 
@@ -44,7 +44,7 @@ def pobierz_krypto_ccxt(ticker_dict, int_label):
     bledy = []
     for name, symbol in ticker_dict.items():
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=150)
             if not ohlcv:
                 bledy.append(f"{name}: Brak danych")
                 continue
@@ -63,9 +63,10 @@ def pobierz_zasoby_yf(ticker_dict, int_label):
     bledy = []
     for name, ticker in ticker_dict.items():
         try:
-            df = yf.download(ticker, period="60d", interval=tf, progress=False)
-            if df.empty or len(df) < 20:
-                bledy.append(f"{name}: Zbyt mało danych")
+            # NAPRAWIONO: Przywrócono period="60d", aby nie psuć wyższych interwałów (np. 1 dzień)
+            df = yf.download(ticker, period="60d", interval=tf, progress=False) 
+            if df.empty or len(df) < 50:
+                bledy.append(f"{name}: Zbyt mało danych w YF")
                 continue
             
             if isinstance(df.columns, pd.MultiIndex):
@@ -80,29 +81,40 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
     try:
         df = df_raw.copy()
         
-        # SZYBKIE WSKAŹNIKI (SWING/DAY TRADING)
+        # Obliczanie wskaźników
         df.ta.ema(length=9, append=True)   
         df.ta.ema(length=21, append=True)  
         df.ta.rsi(length=14, append=True)
-        df.ta.adx(append=True); df.ta.atr(append=True); df.ta.macd(append=True)
-        df['V_Avg'] = df['Volume'].rolling(20).mean()
+        df.ta.adx(append=True)
+        df.ta.atr(append=True)
+        df.ta.macd(append=True)
         
+        # Zabezpieczenie przed brakiem kolumny wolumenu (częste w Yahoo Finance dla Forex)
+        if 'Volume' in df.columns:
+            df['V_Avg'] = df['Volume'].rolling(20).mean()
+        else:
+            df['Volume'] = 0
+            df['V_Avg'] = 0
+        
+        # Pobieramy zamkniętą świecę (-2) i aktualną (-1)
         l = df.iloc[-2]   
         l2 = df.iloc[-3]  
         curr = df.iloc[-1] 
         
-        c_zamkniete = float(l['Close'])
         c_akt = float(curr['Close']) 
         
+        # Zabezpieczenie przed NaN we wskaźnikach
+        if pd.isna(l['EMA_9']) or pd.isna(l['ADX_14']):
+            raise ValueError("Brak wystarczających danych do obliczenia wskaźników.")
+
         ema9, ema21 = float(l['EMA_9']), float(l['EMA_21'])
         atr, adx, rsi = float(l['ATRr_14']), float(l['ADX_14']), float(l['RSI_14'])
         macd_h = float(l['MACDh_12_26_9'])
         macd_h_prev = float(l2['MACDh_12_26_9'])
         
-        if pd.isna(l['Volume']) or l['Volume'] == 0 or pd.isna(l['V_Avg']) or l['V_Avg'] == 0:
-            v_rat = 100.0
-        else:
-            v_rat = (float(l['Volume'] / l['V_Avg']) * 100)
+        # Obliczanie wolumenu % - wyłączone dla FX/Indeksów jeśli YF nie podaje wolumenu
+        is_volume_valid = not (pd.isna(l['Volume']) or l['Volume'] == 0 or pd.isna(l['V_Avg']) or l['V_Avg'] == 0)
+        v_rat = (float(l['Volume'] / l['V_Avg']) * 100) if is_volume_valid else 100.0
         
         adx_min = 20 if ryzyko == "Poluzowany" else 25
         v_min = 90 if ryzyko == "Poluzowany" else 115
@@ -117,8 +129,11 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
         rsi_bull = rsi > 52 
         rsi_bear = rsi < 48
         
-        long = ema_bull and macd_bull and rsi_bull and (adx > adx_min) and (v_rat >= v_min)
-        short = ema_bear and macd_bear and rsi_bear and (adx > adx_min) and (v_rat >= v_min)
+        # Ignoruj warunek wolumenu, jeśli dane go nie wspierają (np. Forex z YF)
+        vol_condition = (v_rat >= v_min) if is_volume_valid else True
+
+        long = ema_bull and macd_bull and rsi_bull and (adx > adx_min) and vol_condition
+        short = ema_bear and macd_bear and rsi_bear and (adx > adx_min) and vol_condition
         
         sig = "KUP" if long else "SPRZEDAJ" if short else "CZEKAJ"
         wej = ema9 if tryb == "Limit (EMA9)" else c_akt
@@ -132,15 +147,15 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
             "Cena Rynkowa": round(c_akt, 4), "Cena Wejścia": round(wej, 4), "RSI": round(rsi, 1),
             "MACD Hist": round(macd_h, 4), 
             "Pęd": "Wzrost" if macd_bull else ("Spadek" if macd_bear else "Płaski"),
-            "ADX": round(adx, 1), "Wolumen %": round(v_rat), 
-            "Ile (1%)": round((kapital*0.01)/abs(wej-sl), 4) if abs(wej-sl) > 0 else 0,
+            "ADX": round(adx, 1), "Wolumen %": round(v_rat) if is_volume_valid else "Brak", 
+            "Ile (1% ryzyka)": round((kapital*0.01)/abs(wej-sl), 4) if abs(wej-sl) > 0 else 0,
             "TP": round(tp, 4), "SL": round(sl, 4)
         }
     except Exception as e:
         return {
-            "Instrument": name, "Sygnał": f"BŁĄD WSK.: {e}", "Siła %": 0,
+            "Instrument": name, "Sygnał": f"BŁĄD: {str(e)[:20]}", "Siła %": 0,
             "Cena Rynkowa": 0, "Cena Wejścia": 0, "RSI": 0, "MACD Hist": 0, 
-            "Pęd": "-", "ADX": 0, "Wolumen %": 0, "Ile (1%)": 0, "TP": 0, "SL": 0
+            "Pęd": "-", "ADX": 0, "Wolumen %": 0, "Ile (1% ryzyka)": 0, "TP": 0, "SL": 0
         }
 
 def stylizuj_momentum(row):
@@ -148,8 +163,8 @@ def stylizuj_momentum(row):
     idx = row.index.tolist()
     sig = str(row['Sygnał'])
     
-    if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: #00ff00; color: black; font-weight: bold'
-    elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: #ff0000; color: white; font-weight: bold'
+    if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
+    elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
     elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
     
     def set_col(col_name, is_green):
@@ -165,35 +180,30 @@ def stylizuj_momentum(row):
     if 'ADX' in idx:
         set_col('ADX', float(row['ADX']) > 20 if row['ADX'] != 0 else False)
     
-    if 'Wolumen %' in idx:
-        v = float(row['Wolumen %'])
-        s[idx.index('Wolumen %')] = 'color: #00ff00' if v > 105 else ('color: #ff4b4b' if v < 55 else '')
-    
     return s
 
 # --- UI ---
 st.title("⚡ Skaner PRO V9.9 - Momentum Sniper")
-st.markdown("**Strategia krótkoterminowa (Swing/Day Trading).** Wymaga potwierdzenia przyspieszenia MACD oraz silnego wolumenu.")
+st.markdown("**Uwaga:** Na platformie XTB występuje *Spread*, który zjada zysk na niskich interwałach (5m-15m). Dostosuj TP/SL manualnie.")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
-    u_kap = st.number_input("Kapitał (PLN):", value=10000)
+    u_kap = st.number_input("Całkowity Kapitał (PLN):", value=3000)
     u_int = st.select_slider("Interwał:", options=list(interval_map_yf.keys()), value="1 godz")
-    u_wej = st.radio("Metoda:", ["Rynkowa", "Limit (EMA9)"])
-    u_ryz = st.radio("Ryzyko:", ["Poluzowany", "Rygorystyczny"])
+    u_wej = st.radio("Metoda wejścia:", ["Rynkowa", "Limit (EMA9)"])
+    u_ryz = st.radio("Ryzyko (Filtry):", ["Poluzowany", "Rygorystyczny"])
 
-t1, t2 = st.tabs(["₿ KRYPTOWALUTY (REAL-TIME)", "📊 INDEKSY & TOWARY"])
+t1, t2 = st.tabs(["₿ KRYPTOWALUTY (KuCoin)", "📊 INDEKSY & FX (Yahoo)"])
 
 with t1:
     dane_krypto, bledy_krypto = pobierz_krypto_ccxt(KRYPTO_CCXT, u_int)
     
     if bledy_krypto and not dane_krypto:
-        st.error(f"🚨 KRYTYCZNY BŁĄD: {bledy_krypto[0]}")
+        st.error(f"🚨 KRYTYCZNY BŁĄD POBIERANIA: {bledy_krypto[0]}")
     elif len(bledy_krypto) > 0:
-        st.warning(f"⚠️ Niektóre monety odrzuciły połączenie (np. {bledy_krypto[0]}), ale analizuję resztę.")
+        st.warning(f"⚠️ Niektóre monety odrzuciły połączenie: {bledy_krypto[0]}")
         
-    wyniki_krypto = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane_krypto.items()]
-    wyniki_krypto = [w for w in wyniki_krypto if w is not None]
+    wyniki_krypto = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane_krypto.items() if df is not None]
     
     if wyniki_krypto:
         df_res = pd.DataFrame(wyniki_krypto).sort_values("Siła %", ascending=False)
@@ -205,10 +215,9 @@ with t2:
     if bledy_zasoby and not dane_zasoby:
         st.error(f"🚨 BŁĄD YAHOO FINANCE: {bledy_zasoby[0]}")
     elif len(bledy_zasoby) > 0:
-        st.warning(f"⚠️ Brak danych dla niektórych symboli (np. {bledy_zasoby[0]}).")
+        st.warning(f"⚠️ Brak danych dla niektórych symboli: {bledy_zasoby[0]}")
         
-    wyniki_zasoby = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane_zasoby.items()]
-    wyniki_zasoby = [w for w in wyniki_zasoby if w is not None]
+    wyniki_zasoby = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane_zasoby.items() if df is not None]
     
     if wyniki_zasoby:
         df_res2 = pd.DataFrame(wyniki_zasoby).sort_values("Siła %", ascending=False)
