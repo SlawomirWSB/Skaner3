@@ -121,7 +121,7 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
         short = ema_bear and macd_bear and rsi_bear and (adx > adx_min) and (v_rat >= v_min)
         
         sig = "KUP" if long else "SPRZEDAJ" if short else "CZEKAJ"
-        wej = ema9 if tryb == "Limit (EMA20)" else c_akt
+        wej = ema9 if tryb == "Limit (EMA9)" else c_akt
         
         sl_buffer = atr * 0.1
         sl = wej - (atr * 1.2) - sl_buffer if sig == "KUP" else wej + (atr * 1.2) + sl_buffer
