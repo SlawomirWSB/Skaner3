@@ -37,7 +37,7 @@ MNOZNIKI_XTB = {
     "EURPLN": 100000, "USDPLN": 100000, "EURUSD": 100000,
     "GOLD": 100, "OIL.WTI": 1000, "SILVER": 5000, "NATGAS": 30000,
     "COPPER": 100000, "COFFEE": 37500, "SUGAR": 112000, "COCOA": 10,
-    "DE40 (DAX)": 110, "US100 (NQ)": 80, "US500 (SP)": 200 # Przybliżone wartości dla 1 Lota
+    "DE40 (DAX)": 110, "US100 (NQ)": 80, "US500 (SP)": 200 # Przybliżone wartości dla 1 Lota na XTB
 }
 
 interval_map_yf = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": "1h", "4 godz": "4h", "1 dzień": "1d"}
@@ -133,34 +133,55 @@ def stylizuj(row):
     idx = row.index.tolist()
     sig = str(row['Sygnał'])
     
-    if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
-    elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
-    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
+    # 1. Kolorowanie głównej komendy (Sygnału)
+    if sig == 'KUP': 
+        s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
+    elif sig == 'SPRZEDAJ': 
+        s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
+    elif 'BŁĄD' in sig: 
+        s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
     
-    def set_col(col_name, is_green):
-        if col_name in idx and 'BŁĄD' not in sig:
-            s[idx.index(col_name)] = 'color: #00ff00' if is_green else 'color: #ff4b4b'
+    # 2. Funkcja wewnętrzna: Koloruj na Zielono jeśli wskaźnik POTWIERDZA sygnał, na Czerwono jeśli PRZECZY
+    def set_confirmation_color(col_name, is_confirming):
+        if col_name in idx and sig in ['KUP', 'SPRZEDAJ']:
+            s[idx.index(col_name)] = 'color: #00ff00' if is_confirming else 'color: #ff4b4b'
 
-    if 'Pęd' in idx:
-        set_col('Pęd', (sig == "KUP" and row['Pęd'] == "Wzrost") or (sig == "SPRZEDAJ" and row['Pęd'] == "Spadek"))
-    if 'RSI' in idx:
-        set_col('RSI', (sig == "KUP" and float(row['RSI']) < 65) or (sig == "SPRZEDAJ" and float(row['RSI']) > 35) if row['RSI'] != 0 else False)
-    if 'MACD Hist' in idx:
-        set_col('MACD Hist', float(row['MACD Hist']) > 0 if row['MACD Hist'] != 0 else False)
-    if 'ADX' in idx:
-        set_col('ADX', float(row['ADX']) > 20 if row['ADX'] != 0 else False)
-    if 'Wolumen %' in idx and str(row['Wolumen %']) != "Brak":
-        v = float(row['Wolumen %'])
-        s[idx.index('Wolumen %')] = 'color: #00ff00' if v > 105 else ('color: #ff4b4b' if v < 55 else '')
+    # 3. Zastosowanie logiki do poszczególnych kolumn
+    if sig in ['KUP', 'SPRZEDAJ']:
+        # Pęd
+        if 'Pęd' in idx:
+            if sig == 'KUP': set_confirmation_color('Pęd', row['Pęd'] == "Wzrost")
+            else: set_confirmation_color('Pęd', row['Pęd'] == "Spadek")
+        
+        # RSI (środek skali to 50)
+        if 'RSI' in idx:
+            rsi_val = float(row['RSI'])
+            if sig == 'KUP': set_confirmation_color('RSI', rsi_val >= 50)
+            else: set_confirmation_color('RSI', rsi_val < 50)
+                
+        # MACD Histogram (linia zero)
+        if 'MACD Hist' in idx:
+            macd_val = float(row['MACD Hist'])
+            if sig == 'KUP': set_confirmation_color('MACD Hist', macd_val > 0)
+            else: set_confirmation_color('MACD Hist', macd_val < 0)
+                
+        # ADX (Siła trendu. >20 ZAWSZE potwierdza sygnał)
+        if 'ADX' in idx:
+            set_confirmation_color('ADX', float(row['ADX']) >= 20)
+            
+        # Wolumen % (Powyżej średniej ZAWSZE potwierdza sygnał)
+        if 'Wolumen %' in idx and str(row['Wolumen %']) != "Brak":
+            set_confirmation_color('Wolumen %', float(row['Wolumen %']) >= 100)
 
+    # 4. Ostrzeżenie o kapitale (Żółty)
     if 'Lot / Sztuki' in idx and '< 0.01' in str(row['Lot / Sztuki']): 
         s[idx.index('Lot / Sztuki')] = 'color: #ffcc00; font-weight: bold'
         
     return s
 
 # --- UI ---
-st.title("⚡ Skaner PRO V10.0 - Ostateczny Sniper")
-st.markdown("**Platforma Handlowa: XTB | Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
+st.title("⚡ Skaner PRO V10.0 -Sniper")
+st.markdown("** | Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
