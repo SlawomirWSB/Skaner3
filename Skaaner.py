@@ -36,7 +36,8 @@ ZASOBY_XTB = {
 MNOZNIKI_XTB = {
     "EURPLN": 100000, "USDPLN": 100000, "EURUSD": 100000,
     "GOLD": 100, "OIL.WTI": 1000, "SILVER": 5000, "NATGAS": 30000,
-    "COPPER": 100000, "COFFEE": 37500, "SUGAR": 112000, "COCOA": 10
+    "COPPER": 100000, "COFFEE": 37500, "SUGAR": 112000, "COCOA": 10,
+    "DE40 (DAX)": 110, "US100 (NQ)": 80, "US500 (SP)": 200 # Przybliżone wartości dla 1 Lota
 }
 
 interval_map_yf = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": "1h", "4 godz": "4h", "1 dzień": "1d"}
@@ -111,9 +112,7 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
         ile_jednostek = (kapital*0.01)/abs(wej-sl) if abs(wej-sl) > 0 else 0
         
         # OBLICZANIE LOTÓW Z OPISAMI
-        if name in ["DE40 (DAX)", "US100 (NQ)", "US500 (SP)"]:
-            lot_wynik = "Kalk. XTB"
-        elif name in MNOZNIKI_XTB:
+        if name in MNOZNIKI_XTB:
             obliczony_lot = ile_jednostek / MNOZNIKI_XTB[name]
             lot_wynik = str(round(obliczony_lot, 2)) if obliczony_lot >= 0.01 else "< 0.01 (Odrzuć)"
         else:
@@ -133,9 +132,30 @@ def stylizuj(row):
     s = [''] * len(row)
     idx = row.index.tolist()
     sig = str(row['Sygnał'])
+    
     if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
     elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
-    if 'Lot / Sztuki' in idx and '< 0.01' in str(row['Lot / Sztuki']): s[idx.index('Lot / Sztuki')] = 'color: #ffcc00'
+    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
+    
+    def set_col(col_name, is_green):
+        if col_name in idx and 'BŁĄD' not in sig:
+            s[idx.index(col_name)] = 'color: #00ff00' if is_green else 'color: #ff4b4b'
+
+    if 'Pęd' in idx:
+        set_col('Pęd', (sig == "KUP" and row['Pęd'] == "Wzrost") or (sig == "SPRZEDAJ" and row['Pęd'] == "Spadek"))
+    if 'RSI' in idx:
+        set_col('RSI', (sig == "KUP" and float(row['RSI']) < 65) or (sig == "SPRZEDAJ" and float(row['RSI']) > 35) if row['RSI'] != 0 else False)
+    if 'MACD Hist' in idx:
+        set_col('MACD Hist', float(row['MACD Hist']) > 0 if row['MACD Hist'] != 0 else False)
+    if 'ADX' in idx:
+        set_col('ADX', float(row['ADX']) > 20 if row['ADX'] != 0 else False)
+    if 'Wolumen %' in idx and str(row['Wolumen %']) != "Brak":
+        v = float(row['Wolumen %'])
+        s[idx.index('Wolumen %')] = 'color: #00ff00' if v > 105 else ('color: #ff4b4b' if v < 55 else '')
+
+    if 'Lot / Sztuki' in idx and '< 0.01' in str(row['Lot / Sztuki']): 
+        s[idx.index('Lot / Sztuki')] = 'color: #ffcc00; font-weight: bold'
+        
     return s
 
 # --- UI ---
