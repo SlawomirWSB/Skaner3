@@ -5,7 +5,8 @@ import yfinance as yf
 import ccxt
 
 # --- KONFIGURACJA ---
-st.subheader("⚡ Skaner PRO V10.0")
+# Ta linijka odpowiada za SZEROKOŚĆ tabeli - musi tu zostać!
+st.set_page_config(page_title="Skaner PRO V10.0", layout="wide")
 
 # MAPOWANIE KRYPTO KUCOIN (Używane do analizy i gry na XTB)
 KRYPTO_CCXT = {
@@ -181,7 +182,7 @@ def stylizuj(row):
 
 # --- UI ---
 st.subheader("⚡ Skaner PRO V10.0")
-st.markdown("** | Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
+st.markdown("**Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
