@@ -180,7 +180,7 @@ def stylizuj(row):
     return s
 
 # --- UI ---
-st.title("⚡ Skaner PRO V10.0 -Sniper")
+st.subheader("⚡ Skaner PRO V10.0")
 st.markdown("** | Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
 
 with st.sidebar:
