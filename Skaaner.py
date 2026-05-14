@@ -122,12 +122,15 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
         
         ile_jednostek = (kapital*0.01)/abs(wej-sl) if abs(wej-sl) > 0 else 0
         
-        # OBLICZANIE LOTÓW Z OPISAMI
+   # OBLICZANIE LOTÓW Z OPISAMI
         if name in MNOZNIKI_XTB:
             obliczony_lot = ile_jednostek / MNOZNIKI_XTB[name]
             lot_wynik = str(round(obliczony_lot, 2)) if obliczony_lot >= 0.01 else "< 0.01 (Odrzuć)"
         else:
-            lot_wynik = f"{round(ile_jednostek, 3)} (Lot/Szt)"
+            # FIX: Przeliczenie ryzyka na USD (zakładając kurs USDPLN ok. 4.0)
+            kurs_usdpln = 4.0 
+            ile_sztuk_krypto = ile_jednostek / kurs_usdpln
+            lot_wynik = f"{round(ile_sztuk_krypto, 4)} (Szt)"
             
         return {
             "Instrument": name, "Sygnał": sig, "Siła %": (95 if sig in ["KUP", "SPRZEDAJ"] else 50),
