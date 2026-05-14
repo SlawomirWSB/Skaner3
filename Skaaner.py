@@ -3,10 +3,10 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 import ccxt
+import pytz
 
 # --- KONFIGURACJA ---
-# Ta linijka odpowiada za SZEROKOŚĆ tabeli - musi tu zostać!
-st.set_page_config(page_title="Skaner PRO V10.0", layout="wide")
+st.set_page_config(page_title="Skaner PRO V10.1", layout="wide")
 
 # MAPOWANIE KRYPTO KUCOIN (Używane do analizy i gry na XTB)
 KRYPTO_CCXT = {
@@ -38,7 +38,7 @@ MNOZNIKI_XTB = {
     "EURPLN": 100000, "USDPLN": 100000, "EURUSD": 100000,
     "GOLD": 100, "OIL.WTI": 1000, "SILVER": 5000, "NATGAS": 30000,
     "COPPER": 100000, "COFFEE": 37500, "SUGAR": 112000, "COCOA": 10,
-    "DE40 (DAX)": 110, "US100 (NQ)": 80, "US500 (SP)": 200 # Przybliżone wartości dla 1 Lota na XTB
+    "DE40 (DAX)": 110, "US100 (NQ)": 80, "US500 (SP)": 200 
 }
 
 interval_map_yf = {"5 min": "5m", "15 min": "15m", "30 min": "30m", "1 godz": "1h", "4 godz": "4h", "1 dzień": "1d"}
@@ -74,7 +74,7 @@ def pobierz_zasoby_yf(ticker_dict, int_label):
         except: continue
     return data, bledy
 
-def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
+def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
     try:
         df = df_raw.copy()
         df.ta.ema(length=9, append=True)   
@@ -106,6 +106,16 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
         elif (ema9 < ema21) and (macd_h < 0) and (macd_h < macd_h_prev) and (rsi < 48) and (adx > adx_min) and (v_rat >= v_min if is_volume_valid else True):
             sig = "SPRZEDAJ"
             
+        # --- FILTR SESYJNY DLA INDEKSÓW ---
+        if filtr_sesji and sig in ["KUP", "SPRZEDAJ"]:
+            czas_pl = pd.Timestamp.now(tz='Europe/Warsaw')
+            godzina = czas_pl.hour + czas_pl.minute / 60.0
+            
+            if name == "DE40 (DAX)" and not (9.0 <= godzina <= 17.5):
+                sig = "CZEKAJ (Poza Sesją)"
+            elif name in ["US100 (NQ)", "US500 (SP)"] and not (15.5 <= godzina <= 22.0):
+                sig = "CZEKAJ (Poza Sesją)"
+
         wej = ema9 if tryb == "Limit (EMA9)" else c_akt
         sl = wej - (atr * 1.2) if sig == "KUP" else wej + (atr * 1.2)
         tp = wej + (atr * 2.4) if sig == "KUP" else wej - (atr * 2.4)
@@ -117,11 +127,10 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko):
             obliczony_lot = ile_jednostek / MNOZNIKI_XTB[name]
             lot_wynik = str(round(obliczony_lot, 2)) if obliczony_lot >= 0.01 else "< 0.01 (Odrzuć)"
         else:
-            # Kryptowaluty (W XTB 1 Lot = 1 Sztuka Monety dla głównych walut)
             lot_wynik = f"{round(ile_jednostek, 3)} (Lot/Szt)"
             
         return {
-            "Instrument": name, "Sygnał": sig, "Siła %": (95 if sig != "CZEKAJ" else 50),
+            "Instrument": name, "Sygnał": sig, "Siła %": (95 if sig in ["KUP", "SPRZEDAJ"] else 50),
             "Cena Rynkowa": round(c_akt, 4), "Cena Wejścia": round(wej, 4), "RSI": round(rsi, 1),
             "MACD Hist": round(macd_h, 4), "Pęd": "Wzrost" if macd_h > macd_h_prev else "Spadek",
             "ADX": round(adx, 1), "Wolumen %": round(v_rat) if is_volume_valid else "Brak", 
@@ -139,6 +148,8 @@ def stylizuj(row):
         s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
     elif sig == 'SPRZEDAJ': 
         s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
+    elif 'Poza Sesją' in sig:
+        s[idx.index('Sygnał')] = 'color: #888888; font-style: italic;'
     elif 'BŁĄD' in sig: 
         s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
     
@@ -149,28 +160,14 @@ def stylizuj(row):
 
     # 3. Zastosowanie logiki do poszczególnych kolumn
     if sig in ['KUP', 'SPRZEDAJ']:
-        # Pęd
         if 'Pęd' in idx:
-            if sig == 'KUP': set_confirmation_color('Pęd', row['Pęd'] == "Wzrost")
-            else: set_confirmation_color('Pęd', row['Pęd'] == "Spadek")
-        
-        # RSI (środek skali to 50)
+            set_confirmation_color('Pęd', row['Pęd'] == "Wzrost" if sig == 'KUP' else row['Pęd'] == "Spadek")
         if 'RSI' in idx:
-            rsi_val = float(row['RSI'])
-            if sig == 'KUP': set_confirmation_color('RSI', rsi_val >= 50)
-            else: set_confirmation_color('RSI', rsi_val < 50)
-                
-        # MACD Histogram (linia zero)
+            set_confirmation_color('RSI', float(row['RSI']) >= 50 if sig == 'KUP' else float(row['RSI']) < 50)
         if 'MACD Hist' in idx:
-            macd_val = float(row['MACD Hist'])
-            if sig == 'KUP': set_confirmation_color('MACD Hist', macd_val > 0)
-            else: set_confirmation_color('MACD Hist', macd_val < 0)
-                
-        # ADX (Siła trendu. >20 ZAWSZE potwierdza sygnał)
+            set_confirmation_color('MACD Hist', float(row['MACD Hist']) > 0 if sig == 'KUP' else float(row['MACD Hist']) < 0)
         if 'ADX' in idx:
             set_confirmation_color('ADX', float(row['ADX']) >= 20)
-            
-        # Wolumen % (Powyżej średniej ZAWSZE potwierdza sygnał)
         if 'Wolumen %' in idx and str(row['Wolumen %']) != "Brak":
             set_confirmation_color('Wolumen %', float(row['Wolumen %']) >= 100)
 
@@ -181,7 +178,7 @@ def stylizuj(row):
     return s
 
 # --- UI ---
-st.subheader("⚡ Skaner PRO V10.0")
+st.subheader("⚡ Skaner PRO V10.1")
 st.markdown("**Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
 
 with st.sidebar:
@@ -190,20 +187,22 @@ with st.sidebar:
     u_int = st.select_slider("Interwał:", options=list(interval_map_yf.keys()), value="1 godz")
     u_wej = st.radio("Metoda:", ["Rynkowa", "Limit (EMA9)"])
     u_ryz = st.radio("Ryzyko:", ["Poluzowany", "Rygorystyczny"])
+    st.markdown("---")
+    u_sesja = st.checkbox("Ignoruj sygnały poza sesją (Indeksy)", value=True)
 
 tabs = st.tabs(["📊 RYNKI TRADYCYJNE (XTB)", "₿ KRYPTOWALUTY (Dane: KuCoin | Gra: XTB)"])
 
 with tabs[0]:
     dane, bledy = pobierz_zasoby_yf(ZASOBY_XTB, u_int)
     if bledy: st.warning(f"Brak danych: {bledy[0]}")
-    wyniki = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane.items()]
+    wyniki = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz, u_sesja) for n, df in dane.items()]
     wyniki = [w for w in wyniki if w is not None]
     if wyniki: st.dataframe(pd.DataFrame(wyniki).sort_values("Siła %", ascending=False).style.apply(stylizuj, axis=1), use_container_width=True)
 
 with tabs[1]:
-    st.info("💡 **Pro-Tip:** Krypto zasilane jest danymi Real-Time z giełdy KuCoin. Przy stawianiu zleceń Limit na XTB pamiętaj, aby zweryfikować strefę wejścia z aktualnym wykresem na platformie ze względu na spread brokera.")
+    st.info("💡")
     dane_c, bledy_c = pobierz_krypto_ccxt(KRYPTO_CCXT, u_int)
     if bledy_c: st.warning(f"Brak danych: {bledy_c[0]}")
-    wyniki = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz) for n, df in dane_c.items()]
+    wyniki = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz, u_sesja) for n, df in dane_c.items()]
     wyniki = [w for w in wyniki if w is not None]
     if wyniki: st.dataframe(pd.DataFrame(wyniki).sort_values("Siła %", ascending=False).style.apply(stylizuj, axis=1), use_container_width=True)
