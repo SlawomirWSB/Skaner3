@@ -6,7 +6,7 @@ import ccxt
 import pytz
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Skaner PRO V10.1", layout="wide")
+st.set_page_config(page_title="Skaner PRO V10.2", layout="wide")
 
 # MAPOWANIE KRYPTO KUCOIN (Używane do analizy i gry na XTB)
 KRYPTO_CCXT = {
@@ -51,7 +51,7 @@ def pobierz_krypto_ccxt(ticker_dict, int_label):
     data, bledy = {}, []
     for name, symbol in ticker_dict.items():
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=150)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=250) # Zwiększono limit do 250 dla Backtestu
             if not ohlcv: continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -86,7 +86,79 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
             df['V_Avg'] = df['Volume'].rolling(20).mean()
         else:
             df['Volume'] = 0; df['V_Avg'] = 0
+            
+        adx_min = 20 if ryzyko == "Poluzowany" else 25
+        v_min = 90 if ryzyko == "Poluzowany" else 115
+
+        # ==========================================
+        # SILNIK BACKTESTINGU (Ostatnie 200 świec)
+        # ==========================================
+        wins, losses = 0, 0
+        closes = df['Close'].to_numpy()
+        highs = df['High'].to_numpy()
+        lows = df['Low'].to_numpy()
+        ema9_arr = df['EMA_9'].to_numpy()
+        ema21_arr = df['EMA_21'].to_numpy()
+        rsi_arr = df['RSI_14'].to_numpy()
+        macd_h_arr = df['MACDh_12_26_9'].to_numpy()
+        adx_arr = df['ADX_14'].to_numpy()
+        atr_arr = df['ATRr_14'].to_numpy()
+        vol_arr = df['Volume'].to_numpy()
+        v_avg_arr = df['V_Avg'].to_numpy()
         
+        start_idx = max(25, len(df) - 200)
+        hours = (df.index.hour + 2) % 24 + df.index.minute / 60.0 # Przybliżenie czasu PL
+        
+        for i in range(start_idx, len(df) - 2):
+            if pd.isna(ema9_arr[i]) or pd.isna(adx_arr[i]): continue
+            
+            ema_bull = ema9_arr[i] > ema21_arr[i]
+            ema_bear = ema9_arr[i] < ema21_arr[i]
+            macd_bull = macd_h_arr[i] > 0 and macd_h_arr[i] > macd_h_arr[i-1]
+            macd_bear = macd_h_arr[i] < 0 and macd_h_arr[i] < macd_h_arr[i-1]
+            rsi_bull = rsi_arr[i] > 52
+            rsi_bear = rsi_arr[i] < 48
+            
+            is_vol_valid = vol_arr[i] > 0 and v_avg_arr[i] > 0
+            v_rat_hist = (vol_arr[i] / v_avg_arr[i]) * 100 if is_vol_valid else 100.0
+            vol_condition = v_rat_hist >= v_min if is_vol_valid else True
+            adx_condition = adx_arr[i] > adx_min
+            
+            sig_hist = "CZEKAJ"
+            if ema_bull and macd_bull and rsi_bull and adx_condition and vol_condition: sig_hist = "KUP"
+            elif ema_bear and macd_bear and rsi_bear and adx_condition and vol_condition: sig_hist = "SPRZEDAJ"
+            
+            if filtr_sesji and sig_hist in ["KUP", "SPRZEDAJ"]:
+                h = hours[i]
+                if name == "DE40 (DAX)" and not (9.0 <= h <= 17.5): sig_hist = "CZEKAJ"
+                elif name in ["US100 (NQ)", "US500 (SP)"] and not (15.5 <= h <= 22.0): sig_hist = "CZEKAJ"
+                
+            if sig_hist in ["KUP", "SPRZEDAJ"]:
+                wej_hist = ema9_arr[i] if tryb == "Limit (EMA9)" else closes[i]
+                sl_hist = wej_hist - (atr_arr[i] * 1.2) if sig_hist == "KUP" else wej_hist + (atr_arr[i] * 1.2)
+                tp_hist = wej_hist + (atr_arr[i] * 2.4) if sig_hist == "KUP" else wej_hist - (atr_arr[i] * 2.4)
+                
+                # Symulacja zlecenia w przyszłość
+                for j in range(i+1, len(df)):
+                    if sig_hist == "KUP":
+                        if lows[j] <= sl_hist: 
+                            losses += 1; break
+                        elif highs[j] >= tp_hist: 
+                            wins += 1; break
+                    else:
+                        if highs[j] >= sl_hist: 
+                            losses += 1; break
+                        elif lows[j] <= tp_hist: 
+                            wins += 1; break
+                            
+        win_rate_str = "Brak"
+        if (wins + losses) > 0:
+            win_rate_val = (wins / (wins + losses)) * 100
+            win_rate_str = f"{int(win_rate_val)}% ({wins}/{wins+losses})"
+
+        # ==========================================
+        # AKTUALNY SYGNAŁ (Ostatnia Zamknięta Świeca)
+        # ==========================================
         l, l2, curr = df.iloc[-2], df.iloc[-3], df.iloc[-1]
         c_akt = float(curr['Close']) 
         
@@ -97,16 +169,12 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
         is_volume_valid = not (pd.isna(l['Volume']) or l['Volume'] == 0 or pd.isna(l['V_Avg']) or l['V_Avg'] == 0)
         v_rat = (float(l['Volume'] / l['V_Avg']) * 100) if is_volume_valid else 100.0
         
-        adx_min = 20 if ryzyko == "Poluzowany" else 25
-        v_min = 90 if ryzyko == "Poluzowany" else 115
-        
         sig = "CZEKAJ"
         if (ema9 > ema21) and (macd_h > 0) and (macd_h > macd_h_prev) and (rsi > 52) and (adx > adx_min) and (v_rat >= v_min if is_volume_valid else True):
             sig = "KUP"
         elif (ema9 < ema21) and (macd_h < 0) and (macd_h < macd_h_prev) and (rsi < 48) and (adx > adx_min) and (v_rat >= v_min if is_volume_valid else True):
             sig = "SPRZEDAJ"
             
-        # --- FILTR SESYJNY DLA INDEKSÓW ---
         if filtr_sesji and sig in ["KUP", "SPRZEDAJ"]:
             czas_pl = pd.Timestamp.now(tz='Europe/Warsaw')
             godzina = czas_pl.hour + czas_pl.minute / 60.0
@@ -122,7 +190,7 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
         
         ile_jednostek = (kapital*0.01)/abs(wej-sl) if abs(wej-sl) > 0 else 0
         
-   # OBLICZANIE LOTÓW Z OPISAMI
+        # OBLICZANIE LOTÓW Z OPISAMI I POPRAWKĄ WALUTOWĄ
         if name in MNOZNIKI_XTB:
             obliczony_lot = ile_jednostek / MNOZNIKI_XTB[name]
             lot_wynik = str(round(obliczony_lot, 2)) if obliczony_lot >= 0.01 else "< 0.01 (Odrzuć)"
@@ -134,6 +202,7 @@ def analizuj_momentum(df_raw, name, kapital, tryb, ryzyko, filtr_sesji):
             
         return {
             "Instrument": name, "Sygnał": sig, "Siła %": (95 if sig in ["KUP", "SPRZEDAJ"] else 50),
+            "Skuteczność (200)": win_rate_str, # NOWA KOLUMNA BACKTESTINGU
             "Cena Rynkowa": round(c_akt, 4), "Cena Wejścia": round(wej, 4), "RSI": round(rsi, 1),
             "MACD Hist": round(macd_h, 4), "Pęd": "Wzrost" if macd_h > macd_h_prev else "Spadek",
             "ADX": round(adx, 1), "Wolumen %": round(v_rat) if is_volume_valid else "Brak", 
@@ -146,22 +215,26 @@ def stylizuj(row):
     idx = row.index.tolist()
     sig = str(row['Sygnał'])
     
-    # 1. Kolorowanie głównej komendy (Sygnału)
-    if sig == 'KUP': 
-        s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
-    elif sig == 'SPRZEDAJ': 
-        s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
-    elif 'Poza Sesją' in sig:
-        s[idx.index('Sygnał')] = 'color: #888888; font-style: italic;'
-    elif 'BŁĄD' in sig: 
-        s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
+    # 1. Kolorowanie Sygnału
+    if sig == 'KUP': s[idx.index('Sygnał')] = 'background-color: rgba(0, 255, 0, 0.2); color: #00ff00; font-weight: bold'
+    elif sig == 'SPRZEDAJ': s[idx.index('Sygnał')] = 'background-color: rgba(255, 0, 0, 0.2); color: #ff0000; font-weight: bold'
+    elif 'Poza Sesją' in sig: s[idx.index('Sygnał')] = 'color: #888888; font-style: italic;'
+    elif 'BŁĄD' in sig: s[idx.index('Sygnał')] = 'background-color: #ffcc00; color: black;'
     
-    # 2. Funkcja wewnętrzna: Koloruj na Zielono jeśli wskaźnik POTWIERDZA sygnał, na Czerwono jeśli PRZECZY
+    # 2. Kolorowanie Backtestingu (Skuteczność)
+    if 'Skuteczność (200)' in idx:
+        val_str = str(row['Skuteczność (200)'])
+        if '%' in val_str:
+            num = int(val_str.split('%')[0])
+            if num >= 60: s[idx.index('Skuteczność (200)')] = 'color: #00ff00; font-weight: bold' # Powyżej 60% super rynek
+            elif num >= 50: s[idx.index('Skuteczność (200)')] = 'color: #ffcc00' # Średnio
+            else: s[idx.index('Skuteczność (200)')] = 'color: #ff4b4b' # Poniżej 50% - unikać
+
     def set_confirmation_color(col_name, is_confirming):
         if col_name in idx and sig in ['KUP', 'SPRZEDAJ']:
             s[idx.index(col_name)] = 'color: #00ff00' if is_confirming else 'color: #ff4b4b'
 
-    # 3. Zastosowanie logiki do poszczególnych kolumn
+    # 3. Kolorowanie wskaźników
     if sig in ['KUP', 'SPRZEDAJ']:
         if 'Pęd' in idx:
             set_confirmation_color('Pęd', row['Pęd'] == "Wzrost" if sig == 'KUP' else row['Pęd'] == "Spadek")
@@ -174,14 +247,13 @@ def stylizuj(row):
         if 'Wolumen %' in idx and str(row['Wolumen %']) != "Brak":
             set_confirmation_color('Wolumen %', float(row['Wolumen %']) >= 100)
 
-    # 4. Ostrzeżenie o kapitale (Żółty)
     if 'Lot / Sztuki' in idx and '< 0.01' in str(row['Lot / Sztuki']): 
         s[idx.index('Lot / Sztuki')] = 'color: #ffcc00; font-weight: bold'
         
     return s
 
 # --- UI ---
-st.subheader("⚡ Skaner PRO V10.1")
+st.subheader("⚡ Skaner PRO V10.2 - Quant System")
 st.markdown("**Źródła danych: KuCoin (Krypto) & Yahoo Finance (Rynki Tradycyjne)**")
 
 with st.sidebar:
@@ -203,7 +275,7 @@ with tabs[0]:
     if wyniki: st.dataframe(pd.DataFrame(wyniki).sort_values("Siła %", ascending=False).style.apply(stylizuj, axis=1), use_container_width=True)
 
 with tabs[1]:
-    st.info("💡")
+    st.info("💡  .")
     dane_c, bledy_c = pobierz_krypto_ccxt(KRYPTO_CCXT, u_int)
     if bledy_c: st.warning(f"Brak danych: {bledy_c[0]}")
     wyniki = [analizuj_momentum(df, n, u_kap, u_wej, u_ryz, u_sesja) for n, df in dane_c.items()]
